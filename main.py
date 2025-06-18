@@ -1,70 +1,72 @@
 import xmlrpc.client
-from config import url, db, username, password
+from odoo_config import url, db, username, password
 
-def conectar_odoo():
-    common = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common")
-    uid = common.authenticate(db, username, password, {})
-    models = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object")
-    return uid, models
+#Autenticacion
+print("Conectando a Odoo...")
+common = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common")
+uid = common.authenticate(db, username, password, {})
+models = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object")
+print("Autenticación exitosa.")
 
-def obtener_items(models, uid, pricelist_id):
-    return models.execute_kw(db, uid, password,
-        'product.pricelist.item', 'search_read',
-        [[['pricelist_id', '=', pricelist_id]]],
-        {'fields': ['id', 'product_tmpl_id', 'fixed_price', 'create_date']})
+# Buscar la lista de precios
+print("Buscando lista de precios...")
+pricelist_id = models.execute_kw(db, uid, password,
+    'product.pricelist', 'search',
+    [[['id', '=', '202']]],
+    {'limit': 1})[0]
+print(f"Lista de precios encontrada: ID {pricelist_id}")
 
-def detectar_duplicados(items):
-    vistos = {}
-    duplicados = {}
+# Obtener líneas de la lista
+print("Obteniendo reglas de precios...")
+items = models.execute_kw(db, uid, password,
+    'product.pricelist.item', 'search_read',
+    [[['pricelist_id', '=', pricelist_id]]],
+    {'fields': ['id', 'product_tmpl_id', 'fixed_price', 'create_date']})
+print(f"Total de reglas encontradas: {len(items)}")
 
-    for item in items:
-        product = item.get('product_tmpl_id')
-        create_date = item.get('create_date')
+# Detectar duplicados
+vistos = {}
+duplicados = {}
 
-        if isinstance(product, list) and len(product) > 0:
-            product_id = product[0]
-            if product_id in vistos:
-                if create_date > vistos[product_id]['create_date']:
-                    duplicados.setdefault(product_id, []).append(vistos[product_id]['id'])
-                    vistos[product_id] = {'id': item['id'], 'create_date': create_date}
-                else:
-                    duplicados.setdefault(product_id, []).append(item['id'])
-            else:
+for i, item in enumerate(items, 1):
+    product = item.get('product_tmpl_id')
+    create_date = item.get('create_date')
+
+    if isinstance(product, list) and len(product) > 0:
+        product_id = product[0]
+        print(f"[{i}/{len(items)}] Procesando producto ID {product_id} - Fecha: {create_date}")
+        if product_id in vistos:
+            if create_date > vistos[product_id]['create_date']:
+                duplicados.setdefault(product_id, []).append(vistos[product_id]['id'])
                 vistos[product_id] = {'id': item['id'], 'create_date': create_date}
-    return duplicados
+                print(f"  ↳ Duplicado detectado. Se conservará la regla más reciente.")
+            else:
+                duplicados.setdefault(product_id, []).append(item['id'])
+                print(f"  ↳ Duplicado detectado. Se conservará la regla anterior.")
+        else:
+            vistos[product_id] = {'id': item['id'], 'create_date': create_date}
 
-def obtener_skus(models, uid, product_ids):
-    skus = models.execute_kw(db, uid, password,
-        'product.template', 'search_read',
-        [[['id', 'in', product_ids]]],
-        {'fields': ['id', 'default_code']})
-    return {product['id']: product['default_code'] for product in skus}
+# Obtener SKUs
+productos_eliminados = {product_id: len(ids) for product_id, ids in duplicados.items()}
+skus = models.execute_kw(db, uid, password,
+    'product.template', 'search_read',
+    [[['id', 'in', list(productos_eliminados.keys())]]],
+    {'fields': ['id', 'default_code']})
+sku_map = {product['id']: product['default_code'] for product in skus}
 
-def eliminar_duplicados(models, uid, duplicados, sku_map):
-    total = 0
+# Eliminar duplicados
+if duplicados:
+    print("Eliminando reglas duplicadas...")
+    total_eliminadas = 0
     for product_id, ids in duplicados.items():
+        print(f" - Eliminando {len(ids)} reglas para producto ID {product_id} (SKU: {sku_map.get(product_id, 'Desconocido')})")
         models.execute_kw(db, uid, password,
             'product.pricelist.item', 'unlink',
             [ids])
-        total += len(ids)
-        print(f" - SKU: {sku_map.get(product_id, 'Desconocido')}, Reglas eliminadas: {len(ids)}")
-    print(f"\nSe eliminaron {total} registros duplicados.")
-
-def main():
-    uid, models = conectar_odoo()
-
-    pricelist_id = models.execute_kw(db, uid, password,
-        'product.pricelist', 'search',
-        [[['id', '=', 201]]], {'limit': 1})[0]
-
-    items = obtener_items(models, uid, pricelist_id)
-    duplicados = detectar_duplicados(items)
-
-    if duplicados:
-        sku_map = obtener_skus(models, uid, list(duplicados.keys()))
-        eliminar_duplicados(models, uid, duplicados, sku_map)
-    else:
-        print("No se encontraron registros duplicados.")
-
-if __name__ == "__main__":
-    main()
+        total_eliminadas += len(ids)
+    print(f"✅ Se eliminaron {total_eliminadas} reglas duplicadas.")
+    print("Productos afectados:")
+    for product_id, count in productos_eliminados.items():
+        print(f" - SKU: {sku_map.get(product_id, 'Desconocido')}, Reglas eliminadas: {count}")
+else:
+    print("✅ No se encontraron reglas duplicadas.")
